@@ -1,0 +1,20 @@
+{
+  "buildFiles": [
+    "/home/ogega/snap/flutter/common/flutter/packages/flutter_tools/gradle/src/main/groovy/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/home/ogega/Android/Sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/home/ogega/Andoid_Projects/SentiSafe-master/android/app/.cxx/RelWithDebInfo/6l19614x/x86_64",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/home/ogega/Android/Sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/home/ogega/Andoid_Projects/SentiSafe-master/android/app/.cxx/RelWithDebInfo/6l19614x/x86_64",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {}
+}

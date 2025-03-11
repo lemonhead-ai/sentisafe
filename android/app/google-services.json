@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "1062005263463",
+    "project_id": "mealvisor-3519a",
+    "storage_bucket": "mealvisor-3519a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1062005263463:android:9040668a950d92ed8c98c2",
+        "android_client_info": {
+          "package_name": "com.jason.fyp_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCmJRZHXGKw2ptHnt-BgdznGcB2gp7xMio"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1062005263463:android:8ccee1dfd4c5a6118c98c2",
+        "android_client_info": {
+          "package_name": "com.raxder.therax"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCmJRZHXGKw2ptHnt-BgdznGcB2gp7xMio"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

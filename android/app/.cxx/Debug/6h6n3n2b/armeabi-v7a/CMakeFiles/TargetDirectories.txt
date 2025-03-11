@@ -1,0 +1,2 @@
+C:/Maprojo/sentisafe/android/app/.cxx/Debug/6h6n3n2b/armeabi-v7a/CMakeFiles/edit_cache.dir
+C:/Maprojo/sentisafe/android/app/.cxx/Debug/6h6n3n2b/armeabi-v7a/CMakeFiles/rebuild_cache.dir

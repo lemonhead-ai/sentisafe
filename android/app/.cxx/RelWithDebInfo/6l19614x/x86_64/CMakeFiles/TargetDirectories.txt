@@ -1,0 +1,2 @@
+/home/ogega/Andoid_Projects/SentiSafe-master/android/app/.cxx/RelWithDebInfo/6l19614x/x86_64/CMakeFiles/edit_cache.dir
+/home/ogega/Andoid_Projects/SentiSafe-master/android/app/.cxx/RelWithDebInfo/6l19614x/x86_64/CMakeFiles/rebuild_cache.dir
