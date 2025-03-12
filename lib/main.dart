@@ -15,7 +15,6 @@ import 'screens/blind_mode/blind_mode_home.dart';
 import 'services/auth.dart';
 import 'wrapper.dart';
 import 'theme_provider.dart';
-// Make sure to import the file containing UserModeProvider and Routes
 
 // Constants for current date/time and user
 const String CURRENT_DATETIME = '2025-03-11 16:59:33';
@@ -96,16 +95,54 @@ class MyApp extends StatelessWidget {
     final themeProvider = Provider.of<ThemeProvider>(context);
     final userMode = Provider.of<UserModeProvider>(context);
 
+    // OPTION 1: Define a complete TextTheme with ALL non-null font sizes
+    final baseTextTheme = ThemeData.light().textTheme.copyWith(
+      displayLarge: const TextStyle(fontSize: 96),
+      displayMedium: const TextStyle(fontSize: 60),
+      displaySmall: const TextStyle(fontSize: 48),
+      headlineLarge: const TextStyle(fontSize: 40),
+      headlineMedium: const TextStyle(fontSize: 34),
+      headlineSmall: const TextStyle(fontSize: 24),
+      titleLarge: const TextStyle(fontSize: 20),
+      titleMedium: const TextStyle(fontSize: 16),
+      titleSmall: const TextStyle(fontSize: 14),
+      bodyLarge: const TextStyle(fontSize: 16),
+      bodyMedium: const TextStyle(fontSize: 14),
+      bodySmall: const TextStyle(fontSize: 12),
+      labelLarge: const TextStyle(fontSize: 14),
+      labelMedium: const TextStyle(fontSize: 12),
+      labelSmall: const TextStyle(fontSize: 10),
+    );
+
+    // OPTION 2: Create separate themes for regular and blind mode
+    final regularTextTheme = baseTextTheme;
+    final blindTextTheme = TextTheme(
+      displayLarge: baseTextTheme.displayLarge?.copyWith(fontSize: 125),
+      displayMedium: baseTextTheme.displayMedium?.copyWith(fontSize: 78),
+      displaySmall: baseTextTheme.displaySmall?.copyWith(fontSize: 62),
+      headlineLarge: baseTextTheme.headlineLarge?.copyWith(fontSize: 52),
+      headlineMedium: baseTextTheme.headlineMedium?.copyWith(fontSize: 44),
+      headlineSmall: baseTextTheme.headlineSmall?.copyWith(fontSize: 31),
+      titleLarge: baseTextTheme.titleLarge?.copyWith(fontSize: 26),
+      titleMedium: baseTextTheme.titleMedium?.copyWith(fontSize: 21),
+      titleSmall: baseTextTheme.titleSmall?.copyWith(fontSize: 18),
+      bodyLarge: baseTextTheme.bodyLarge?.copyWith(fontSize: 21),
+      bodyMedium: baseTextTheme.bodyMedium?.copyWith(fontSize: 18),
+      bodySmall: baseTextTheme.bodySmall?.copyWith(fontSize: 16),
+      labelLarge: baseTextTheme.labelLarge?.copyWith(fontSize: 18),
+      labelMedium: baseTextTheme.labelMedium?.copyWith(fontSize: 16),
+      labelSmall: baseTextTheme.labelSmall?.copyWith(fontSize: 13),
+    );
+
     return MaterialApp(
       title: 'Safety App',
       theme: ThemeData.light().copyWith(
         primaryColor: Colors.blue,
-        colorScheme: ColorScheme.light(
+        colorScheme: const ColorScheme.light(
           secondary: Colors.blueAccent,
         ),
-        textTheme: ThemeData.light().textTheme.apply(
-          fontSizeFactor: userMode.isBlindMode ? 1.3 : 1.0,
-        ),
+        // Use Option 2: Separate themes approach (safer and more explicit)
+        textTheme: userMode.isBlindMode ? blindTextTheme : regularTextTheme,
         elevatedButtonTheme: ElevatedButtonThemeData(
           style: ElevatedButton.styleFrom(
             padding: EdgeInsets.all(userMode.isBlindMode ? 20.0 : 16.0),
@@ -117,11 +154,18 @@ class MyApp extends StatelessWidget {
       ),
       darkTheme: ThemeData.dark().copyWith(
         primaryColor: Colors.blueGrey,
-        colorScheme: ColorScheme.dark(
+        colorScheme: const ColorScheme.dark(
           secondary: Colors.blueAccent,
         ),
-        textTheme: ThemeData.dark().textTheme.apply(
-          fontSizeFactor: userMode.isBlindMode ? 1.3 : 1.0,
+        // Use Option 2: Separate themes approach (safer and more explicit)
+        textTheme: userMode.isBlindMode ? blindTextTheme : regularTextTheme,
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            padding: EdgeInsets.all(userMode.isBlindMode ? 20.0 : 16.0),
+            textStyle: TextStyle(
+              fontSize: userMode.isBlindMode ? 20.0 : 16.0,
+            ),
+          ),
         ),
       ),
       themeMode: themeProvider.currentTheme,
