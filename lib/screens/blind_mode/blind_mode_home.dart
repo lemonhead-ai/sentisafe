@@ -8,7 +8,6 @@ import 'package:camera/camera.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:vibration/vibration.dart';
 
 class BlindModeHome extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -151,9 +150,7 @@ class _BlindModeHomeState extends State<BlindModeHome>
   }
 
   Future<void> _vibrate({int duration = 100}) async {
-    if (await Vibration.hasVibrator() ?? false) {
-      await Vibration.vibrate(duration: duration);
-    }
+    await HapticFeedback.vibrate();
   }
 
   Future<void> _speakError(String message) async {
@@ -203,28 +200,40 @@ class _BlindModeHomeState extends State<BlindModeHome>
       final String base64Image = base64Encode(imageBytes);
 
       final response = await http.post(
-        Uri.parse('YOUR_API_ENDPOINT'),
+        Uri.parse('https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro-vision-latest:generateContent'),
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': 'Bearer YOUR_API_KEY',
+          'Authorization': 'Bearer AIzaSyDipvP5o1qMayn0qkoiktH7rKN7w2BX-HM',
         },
         body: jsonEncode({
-          'image': base64Image,
+          'contents': [{
+            'parts': [{
+              'inlineData': {
+                'mimeType': 'image/jpeg',
+                'data': base64Image
+              }
+            }]
+          }],
+          'generationConfig': {
+            'temperature': 0.4,
+            'topK': 32,
+            'topP': 1,
+            'maxOutputTokens': 2048,
+          },
           'mode': 'blind_assistance',
         }),
       );
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        return data['description'] ?? "No description available";
+        return data['candidates'][0]['content']['parts'][0]['text'] ?? "No description available";
       } else {
-        throw Exception('API request failed');
+        throw Exception('API request failed with status code: ${response.statusCode}');
       }
     } catch (e) {
       throw Exception('Image analysis failed: $e');
     }
   }
-
   void _showSettings() {
     showModalBottomSheet(
       context: context,

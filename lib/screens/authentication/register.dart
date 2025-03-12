@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import 'dart:ui';
 import '../../main.dart';
+import '../../user_model.dart';
 
 
 class Register extends StatefulWidget {

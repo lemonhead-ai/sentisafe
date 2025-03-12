@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'dart:ui';
-import '../../main.dart';
+import '../../user_model.dart';
 import 'shared_components.dart';
 
 // UserModeProvider for managing blind mode state

@@ -24,7 +24,7 @@ dependencies:
   google_maps_flutter: ^2.5.0
 
   flutter_spinkit: ^5.2.0
-  vibration: ^1.8.4
+
 
 
   
