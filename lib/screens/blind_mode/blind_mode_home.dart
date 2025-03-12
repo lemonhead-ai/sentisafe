@@ -1,13 +1,15 @@
-import 'dart:collection';
-import 'dart:convert';
-import 'dart:io';
 import 'dart:async';
+import 'dart:collection';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
-import 'package:http/http.dart' as http;
-import 'package:flutter_tts/flutter_tts.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:share_plus/share_plus.dart';
+import 'accessibility_service.dart';
+import 'accessibility_settings.dart';
+import 'safety_helpers.dart';
+import 'safety_types.dart';
+import 'safety_ui_components.dart';
 
 class BlindModeHome extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -24,93 +26,57 @@ class BlindModeHome extends StatefulWidget {
 class _BlindModeHomeState extends State<BlindModeHome>
     with WidgetsBindingObserver {
   late CameraController _cameraController;
-  late FlutterTts flutterTts;
-  Timer? analysisTimer;
+  late AccessibilityService _accessibilityService;
+  late SafetyState _safetyState;
+
+  Timer? safetyCheckTimer;
+  Position? currentPosition;
+  String? emergencyContact = "";
 
   bool isProcessing = false;
   bool isContinuousMode = false;
   bool isInitialized = false;
-  String lastAnalysis = "";
   double speechRate = 0.45;
-  bool isScreenReaderActive = false;
-  DateTime? lastTapTime;
 
-  // Analysis Queue
-  final Queue<DateTime> analysisQueue = Queue<DateTime>();
-  static const int minAnalysisInterval = 3; // seconds
+  // For tracking analysis redundancy
+  final Queue<String> _lastResults = Queue<String>();
+  final int _maxStoredResults = 3;
+  DateTime _lastAnalysisTime = DateTime.now();
+  final int _minAnalysisInterval = 3000; // milliseconds
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _safetyState = SafetyState();
+    _accessibilityService = AccessibilityService();
     _initializeServices();
-    // Keep screen on without wakelock
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersive);
-    _keepScreenOn(true);
-  }
-
-  // Alternative to wakelock - keep screen on
-  void _keepScreenOn(bool on) {
-    if (on) {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-      SystemChrome.setSystemUIChangeCallback((systemOverlaysAreVisible) {
-        if (!systemOverlaysAreVisible) {
-          Future.delayed(const Duration(seconds: 2), () {
-            SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-          });
-        }
-        return Future.value();
-      });
-    } else {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    }
+    SafetyHelpers.keepScreenOn(true);
   }
 
   Future<void> _initializeServices() async {
     try {
-      await _initTTS();
-      await _requestPermissions();
+      await _accessibilityService.initTTS(speechRate);
+
+      if (!await SafetyHelpers.requestPermissions()) {
+        throw Exception('Required permissions not granted');
+      }
+
       await _initCamera();
+      await _updateLocation();
+
+      if (!await SafetyHelpers.checkLocationService()) {
+        await _accessibilityService.speak(
+            "Location services are disabled. Some safety features may not work."
+        );
+      }
 
       setState(() => isInitialized = true);
       await _speakWelcomeMessage();
+      _startSafetyChecks();
     } catch (e) {
       debugPrint('Initialization error: $e');
-      _speakError("App initialization failed. Please restart the app.");
-    }
-  }
-
-  Future<void> _initTTS() async {
-    flutterTts = FlutterTts();
-    await flutterTts.setLanguage("en-US");
-    await flutterTts.setSpeechRate(speechRate);
-    await flutterTts.setVolume(1.0);
-    await flutterTts.setPitch(1.0);
-
-    flutterTts.setStartHandler(() {
-      setState(() => isScreenReaderActive = true);
-    });
-
-    flutterTts.setCompletionHandler(() {
-      setState(() => isScreenReaderActive = false);
-    });
-
-    flutterTts.setErrorHandler((msg) {
-      setState(() => isScreenReaderActive = false);
-      _vibrate(duration: 500);
-    });
-  }
-
-  Future<void> _requestPermissions() async {
-    await [
-      Permission.camera,
-      Permission.microphone,
-      Permission.storage,
-    ].request();
-
-    // Verify critical permissions
-    if (!(await Permission.camera.isGranted)) {
-      throw Exception('Camera permission is required');
+      await _accessibilityService.speakError("App initialization failed. Please restart the app.");
     }
   }
 
@@ -119,6 +85,7 @@ class _BlindModeHomeState extends State<BlindModeHome>
       widget.cameras[0],
       ResolutionPreset.medium,
       enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.jpeg,
     );
 
     try {
@@ -130,110 +97,175 @@ class _BlindModeHomeState extends State<BlindModeHome>
     }
   }
 
+  Future<void> _updateLocation() async {
+    currentPosition = await _accessibilityService.getCurrentLocation();
+  }
+
+  void _startSafetyChecks() {
+    safetyCheckTimer = Timer.periodic(const Duration(minutes: 5), (_) async {
+      await _updateLocation();
+      if (!isContinuousMode && !isProcessing) {
+        await _analyzeEnvironment(safetyFocused: true);
+      }
+    });
+  }
+
   Future<void> _speakWelcomeMessage() async {
     const welcome = """
-      Welcome to Vision Assistant.
-      Touch anywhere on the screen to analyze what's in front of you.
-      Double tap for continuous analysis.
-      Swipe down to hear the last description again.
+      Welcome to your Personal Safety Assistant.
+      Touch anywhere on the screen to analyze your surroundings.
+      Double tap for continuous safety monitoring.
+      Swipe down to hear the last analysis again.
       Swipe up for settings.
+      Triple tap to activate emergency mode.
     """;
-
-    await _speak(welcome);
+    await _accessibilityService.speak(welcome);
   }
 
-  Future<void> _speak(String message) async {
-    if (isScreenReaderActive) {
-      await flutterTts.stop();
+  Future<void> _startContinuousScanningMode(bool safetyFocused) async {
+    if (!_cameraController.value.isInitialized) {
+      await _initCamera();
     }
-    await flutterTts.speak(message);
+
+    await _accessibilityService.initContinuousScanning();
+    await _accessibilityService.startContinuousScanning(safetyFocused);
+
+    // Set up result handler to process analysis results
+    _accessibilityService.onAnalysisResult = (String result) async {
+      if (_shouldProcessResult(result)) {
+        setState(() {
+          _safetyState.lastAnalysis = result;
+          _lastAnalysisTime = DateTime.now();
+        });
+
+        if (safetyFocused || SafetyHelpers.containsSafetyKeywords(result)) {
+          setState(() => _safetyState.hazardDetected = true);
+          await _handleSafetyAlert(result);
+        } else {
+          setState(() => _safetyState.hazardDetected = false);
+          await _accessibilityService.speak(result);
+        }
+      }
+    };
   }
 
-  Future<void> _vibrate({int duration = 100}) async {
-    await HapticFeedback.vibrate();
+  void _stopContinuousScanningMode() async {
+    await _accessibilityService.stopContinuousScanning();
   }
 
-  Future<void> _speakError(String message) async {
-    await _vibrate(duration: 500);
-    await _speak("Error: $message");
+  bool _shouldProcessResult(String newResult) {
+    // Skip if too recent from last analysis
+    if (DateTime.now().difference(_lastAnalysisTime).inMilliseconds < _minAnalysisInterval) {
+      return false;
+    }
+
+    // Check for similar previous results
+    for (final prevResult in _lastResults) {
+      if (_calculateSimilarity(prevResult, newResult) > 0.7) {
+        return false;
+      }
+    }
+
+    // Store new result
+    _lastResults.add(newResult);
+    if (_lastResults.length > _maxStoredResults) {
+      _lastResults.removeFirst();
+    }
+
+    return true;
   }
 
-  Future<void> _analyzeEnvironment({bool isSingleAnalysis = true}) async {
+  double _calculateSimilarity(String a, String b) {
+    // Simple Jaccard similarity implementation
+    final Set<String> wordsA = a.toLowerCase().split(' ').toSet();
+    final Set<String> wordsB = b.toLowerCase().split(' ').toSet();
+
+    final intersection = wordsA.intersection(wordsB).length;
+    final union = wordsA.union(wordsB).length;
+
+    return union == 0 ? 0 : intersection / union;
+  }
+
+  Future<void> _analyzeEnvironment({
+    bool isSingleAnalysis = true,
+    bool safetyFocused = false
+  }) async {
     if (isProcessing) {
-      await _speak("Still analyzing. Please wait.");
+      await _accessibilityService.speak("Still analyzing. Please wait.");
       return;
     }
 
     setState(() => isProcessing = true);
-    await _vibrate();
+    await _accessibilityService.vibrate();
 
     try {
-      await _speak("Analyzing environment");
+      safetyFocused
+          ? await _accessibilityService.speak("Scanning for potential hazards")
+          : await _accessibilityService.speak("Analyzing surroundings");
 
       final XFile image = await _cameraController.takePicture();
-      final String description = await _performImageAnalysis(image);
+      final String description =
+      await _accessibilityService.performImageAnalysis(image, safetyFocused);
 
       setState(() {
-        lastAnalysis = description;
+        _safetyState.lastAnalysis = description;
         isProcessing = false;
       });
 
-      await _speak(description);
-
-      if (!isSingleAnalysis && isContinuousMode) {
-        analysisTimer = Timer(
-          const Duration(seconds: minAnalysisInterval),
-          () => _analyzeEnvironment(isSingleAnalysis: false),
-        );
+      if (safetyFocused || SafetyHelpers.containsSafetyKeywords(description)) {
+        setState(() => _safetyState.hazardDetected = true);
+        await _handleSafetyAlert(description);
+      } else {
+        setState(() => _safetyState.hazardDetected = false);
+        await _accessibilityService.speak(description);
       }
     } catch (e) {
       setState(() => isProcessing = false);
-      await _speakError("Analysis failed. Please try again.");
+      await _accessibilityService.speakError("Analysis failed. Please try again.");
       debugPrint('Analysis error: $e');
     }
   }
 
-  Future<String> _performImageAnalysis(XFile imageFile) async {
-    try {
-      final File image = File(imageFile.path);
-      final List<int> imageBytes = await image.readAsBytes();
-      final String base64Image = base64Encode(imageBytes);
+  Future<void> _handleSafetyAlert(String description) async {
+    _safetyState.safetyAlertCount++;
 
-      final response = await http.post(
-        Uri.parse('https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro-vision-latest:generateContent'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer AIzaSyDipvP5o1qMayn0qkoiktH7rKN7w2BX-HM',
-        },
-        body: jsonEncode({
-          'contents': [{
-            'parts': [{
-              'inlineData': {
-                'mimeType': 'image/jpeg',
-                'data': base64Image
-              }
-            }]
-          }],
-          'generationConfig': {
-            'temperature': 0.4,
-            'topK': 32,
-            'topP': 1,
-            'maxOutputTokens': 2048,
-          },
-          'mode': 'blind_assistance',
-        }),
+    String alertMessage = "SAFETY ALERT: $description";
+    await _accessibilityService.speak(alertMessage);
+
+    if (_safetyState.safetyAlertCount > SafetyConstants.maxSafetyAlerts) {
+      await _accessibilityService.speak(
+          "Multiple safety concerns detected. Would you like to activate emergency mode? Triple tap to confirm."
       );
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['candidates'][0]['content']['parts'][0]['text'] ?? "No description available";
-      } else {
-        throw Exception('API request failed with status code: ${response.statusCode}');
-      }
-    } catch (e) {
-      throw Exception('Image analysis failed: $e');
+      _safetyState.safetyAlertCount = 0;
     }
   }
+
+  Future<void> _activateEmergencyMode() async {
+    if (_safetyState.sosMode) {
+      await _accessibilityService.speak("Emergency mode already active.");
+      return;
+    }
+
+    setState(() => _safetyState.sosMode = true);
+    await _accessibilityService.speak(
+        "Emergency mode activated. Current location being monitored. Swipe right to send emergency alert with your location."
+    );
+  }
+
+  Future<void> _sendEmergencyAlert() async {
+    await _updateLocation();
+    String message = SafetyHelpers.constructEmergencyMessage(currentPosition);
+
+    if (emergencyContact!.isNotEmpty) {
+      await _accessibilityService.sendEmergencyAlert(message);
+    } else {
+      await Share.share(message, subject: "Emergency Alert");
+      await _accessibilityService.speak(
+          "No emergency contact set. Please share this message with someone who can help."
+      );
+    }
+  }
+
   void _showSettings() {
     showModalBottomSheet(
       context: context,
@@ -245,70 +277,89 @@ class _BlindModeHomeState extends State<BlindModeHome>
       builder: (context) => AccessibilitySettings(
         speechRate: speechRate,
         isContinuousMode: isContinuousMode,
+        emergencyContact: emergencyContact ?? "",
         onSpeechRateChanged: (newRate) async {
           setState(() => speechRate = newRate);
-          await flutterTts.setSpeechRate(newRate);
-          await _speak("Speech rate updated");
+          await _accessibilityService.initTTS(newRate);
+          await _accessibilityService.speak("Speech rate updated");
         },
         onContinuousModeChanged: (enabled) {
           setState(() => isContinuousMode = enabled);
           if (enabled) {
-            _analyzeEnvironment(isSingleAnalysis: false);
+            _startContinuousScanningMode(true);
           } else {
-            analysisTimer?.cancel();
+            _stopContinuousScanningMode();
           }
+        },
+        onEmergencyContactChanged: (contact) {
+          setState(() => emergencyContact = contact);
+          _accessibilityService.speak("Emergency contact updated");
         },
       ),
     );
   }
 
+  void _handleTap() async {
+    final now = DateTime.now();
+    if (_safetyState.lastTapTime != null) {
+      final difference = now.difference(_safetyState.lastTapTime!);
+      if (difference < SafetyConstants.doubleTapThreshold) {
+        return; // Ignore rapid taps
+      }
+
+      if (difference < SafetyConstants.emergencyTapWindow) {
+        _safetyState.safetyAlertCount++;
+        if (_safetyState.safetyAlertCount >= SafetyConstants.maxSafetyAlerts) {
+          _safetyState.safetyAlertCount = 0;
+          await _activateEmergencyMode();
+          return;
+        }
+      } else {
+        _safetyState.safetyAlertCount = 1;
+      }
+    } else {
+      _safetyState.safetyAlertCount = 1;
+    }
+
+    _safetyState.lastTapTime = now;
+    await _analyzeEnvironment();
+  }
+
+  void _handleDoubleTap() async {
+    setState(() => isContinuousMode = !isContinuousMode);
+    if (isContinuousMode) {
+      await _accessibilityService.speak("Starting continuous safety monitoring");
+      _startContinuousScanningMode(true);
+    } else {
+      _stopContinuousScanningMode();
+      await _accessibilityService.speak("Continuous monitoring stopped");
+    }
+  }
+
+  void _handleVerticalDrag(DragEndDetails details) async {
+    if (details.velocity.pixelsPerSecond.dy > 0) {
+      if (_safetyState.lastAnalysis.isNotEmpty) {
+        await _accessibilityService.speak(_safetyState.lastAnalysis);
+      } else {
+        await _accessibilityService.speak(
+            "No analysis available yet. Tap to analyze your surroundings."
+        );
+      }
+    } else {
+      _showSettings();
+    }
+  }
+
+  void _handleHorizontalDrag(DragEndDetails details) async {
+    if (_safetyState.sosMode && details.velocity.pixelsPerSecond.dx > 0) {
+      await _sendEmergencyAlert();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!isInitialized) {
-      return Scaffold(
-        backgroundColor: Colors.black,
-        body: Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [Colors.indigo.shade900, Colors.black],
-            ),
-          ),
-          child: Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const SizedBox(
-                  width: 100,
-                  height: 100,
-                  child: CircularProgressIndicator(
-                    color: Colors.white,
-                    strokeWidth: 6,
-                  ),
-                ),
-                const SizedBox(height: 30),
-                const Text(
-                  'Vision Assistant',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 32,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'Initializing services...',
-                  style: TextStyle(
-                    color: Colors.white.withOpacity(0.7),
-                    fontSize: 18,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
+      return SafetyUIComponents.buildLoadingScreen();
     }
 
     return Scaffold(
@@ -318,12 +369,13 @@ class _BlindModeHomeState extends State<BlindModeHome>
         onTapDown: (_) => _handleTap(),
         onDoubleTap: () => _handleDoubleTap(),
         onVerticalDragEnd: (details) => _handleVerticalDrag(details),
+        onHorizontalDragEnd: (details) => _handleHorizontalDrag(details),
         child: Stack(
           fit: StackFit.expand,
           children: [
             CameraPreview(_cameraController),
 
-            // Help indicators - fade out after initialization
+            // Overlay gradients
             Container(
               decoration: BoxDecoration(
                 gradient: LinearGradient(
@@ -339,81 +391,72 @@ class _BlindModeHomeState extends State<BlindModeHome>
               ),
             ),
 
-            // Processing Overlay
-            if (isProcessing)
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 300),
-                color: Colors.black.withOpacity(0.7),
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: Colors.indigo.withOpacity(0.3),
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        child: const CircularProgressIndicator(
-                          color: Colors.white,
-                          strokeWidth: 4,
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      const Text(
-                        'Analyzing...',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
+            // SOS Mode Indicator
+            if (_safetyState.sosMode)
+              Container(
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: Colors.red.withOpacity(0.7),
+                    width: 12.0,
                   ),
                 ),
               ),
 
-            // Mode indicator
+            SafetyUIComponents.buildAnalysisOverlay(
+              isProcessing: isProcessing,
+              hazardDetected: _safetyState.hazardDetected,
+              isContinuousMode: isContinuousMode,
+              lastAnalysis: _safetyState.lastAnalysis,
+              onRefresh: () {
+                if (_safetyState.lastAnalysis.isNotEmpty) {
+                  _accessibilityService.speak(_safetyState.lastAnalysis);
+                }
+              },
+            ),
+
+            // Mode indicators and help button
             Positioned(
               top: 40,
               right: 20,
-              child: AnimatedOpacity(
-                duration: const Duration(milliseconds: 300),
-                opacity: isContinuousMode ? 1.0 : 0.0,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: Colors.indigo.withOpacity(0.8),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 10,
-                        height: 10,
-                        decoration: BoxDecoration(
-                          color: Colors.greenAccent,
-                          borderRadius: BorderRadius.circular(5),
-                        ),
+              child: Column(
+                children: [
+                  if (isContinuousMode)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8
                       ),
-                      const SizedBox(width: 8),
-                      const Text(
-                        'CONTINUOUS',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                        ),
+                      decoration: BoxDecoration(
+                        color: Colors.indigo.withOpacity(0.8),
+                        borderRadius: BorderRadius.circular(20),
                       ),
-                    ],
-                  ),
-                ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 10,
+                            height: 10,
+                            decoration: BoxDecoration(
+                              color: Colors.greenAccent,
+                              borderRadius: BorderRadius.circular(5),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Text(
+                            'CONTINUOUS SAFETY',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
               ),
             ),
 
-            // Help indicator
             Positioned(
               top: 40,
               left: 20,
@@ -426,351 +469,21 @@ class _BlindModeHomeState extends State<BlindModeHome>
                 onPressed: _speakWelcomeMessage,
               ),
             ),
-
-            // Analysis results panel
-            Positioned(
-              bottom: 0,
-              left: 0,
-              right: 0,
-              child: Container(
-                margin: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.8),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: Colors.indigo.withOpacity(0.5),
-                    width: 1,
-                  ),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 20, 20, 5),
-                      child: Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: Colors.indigo.withOpacity(0.3),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: const Icon(
-                              Icons.remove_red_eye,
-                              color: Colors.white,
-                              size: 24,
-                            ),
-                          ),
-                          const SizedBox(width: 15),
-                          Expanded(
-                            child: Text(
-                              isContinuousMode
-                                  ? 'Continuous Analysis Active'
-                                  : 'Tap to Analyze',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 18,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ),
-                          if (lastAnalysis.isNotEmpty)
-                            IconButton(
-                              icon: const Icon(
-                                Icons.refresh,
-                                color: Colors.white70,
-                              ),
-                              onPressed: () {
-                                if (lastAnalysis.isNotEmpty) {
-                                  _speak(lastAnalysis);
-                                }
-                              },
-                            ),
-                        ],
-                      ),
-                    ),
-                    if (lastAnalysis.isNotEmpty)
-                      Container(
-                        padding: const EdgeInsets.fromLTRB(20, 5, 20, 20),
-                        child: Text(
-                          lastAnalysis,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                          ),
-                          maxLines: 3,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    // Gesture hints
-                    Container(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      decoration: BoxDecoration(
-                        color: Colors.indigo.withOpacity(0.2),
-                        borderRadius: const BorderRadius.only(
-                          bottomLeft: Radius.circular(20),
-                          bottomRight: Radius.circular(20),
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                        children: [
-                          _gestureHint(Icons.touch_app, 'Tap'),
-                          _gestureHint(Icons.touch_app, 'Double Tap'),
-                          _gestureHint(Icons.swipe, 'Swipe Down'),
-                          _gestureHint(Icons.settings, 'Swipe Up'),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _gestureHint(IconData icon, String label) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            icon,
-            color: Colors.white70,
-            size: 18,
-          ),
-          const SizedBox(height: 4),
-          Text(
-            label,
-            style: TextStyle(
-              color: Colors.white.withOpacity(0.7),
-              fontSize: 12,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _handleTap() async {
-    final now = DateTime.now();
-    if (lastTapTime != null &&
-        now.difference(lastTapTime!) < const Duration(milliseconds: 300)) {
-      return; // Ignore rapid taps
-    }
-    lastTapTime = now;
-    await _analyzeEnvironment();
-  }
-
-  void _handleDoubleTap() async {
-    setState(() => isContinuousMode = !isContinuousMode);
-    if (isContinuousMode) {
-      await _speak("Starting continuous analysis");
-      _analyzeEnvironment(isSingleAnalysis: false);
-    } else {
-      analysisTimer?.cancel();
-      await _speak("Continuous analysis stopped");
-    }
-  }
-
-  void _handleVerticalDrag(DragEndDetails details) async {
-    if (details.velocity.pixelsPerSecond.dy > 0) {
-      // Swipe down - repeat last analysis
-      if (lastAnalysis.isNotEmpty) {
-        await _speak(lastAnalysis);
-      }
-    } else {
-      // Swipe up - show settings
-      _showSettings();
-    }
-  }
-
   @override
   void dispose() {
-    analysisTimer?.cancel();
+    if (isContinuousMode) {
+      _stopContinuousScanningMode();
+    }
+    safetyCheckTimer?.cancel();
     _cameraController.dispose();
-    flutterTts.stop();
-    _keepScreenOn(false);
+    SafetyHelpers.keepScreenOn(false);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
-  }
-}
-
-class AccessibilitySettings extends StatelessWidget {
-  final double speechRate;
-  final bool isContinuousMode;
-  final ValueChanged<double> onSpeechRateChanged;
-  final ValueChanged<bool> onContinuousModeChanged;
-
-  const AccessibilitySettings({
-    Key? key,
-    required this.speechRate,
-    required this.isContinuousMode,
-    required this.onSpeechRateChanged,
-    required this.onContinuousModeChanged,
-  }) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(24, 30, 24, 24),
-      decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(25.0)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.indigo.withOpacity(0.3),
-            blurRadius: 20,
-            spreadRadius: 5,
-          ),
-        ],
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Handle bar
-          Container(
-            width: 60,
-            height: 5,
-            margin: const EdgeInsets.only(bottom: 25),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade600,
-              borderRadius: BorderRadius.circular(5),
-            ),
-          ),
-          const Text(
-            'Accessibility Settings',
-            style: TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
-            ),
-          ),
-          const SizedBox(height: 30),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade900,
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Column(
-              children: [
-                ListTile(
-                  leading: const Icon(
-                    Icons.speed,
-                    color: Colors.indigo,
-                    size: 28,
-                  ),
-                  title: const Text(
-                    'Speech Rate',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          const Icon(
-                            Icons.voice_over_off,
-                            color: Colors.white54,
-                            size: 18,
-                          ),
-                          Expanded(
-                            child: Slider(
-                              value: speechRate,
-                              min: 0.25,
-                              max: 1.0,
-                              divisions: 6,
-                              activeColor: Colors.indigo,
-                              inactiveColor: Colors.grey.shade700,
-                              onChanged: onSpeechRateChanged,
-                            ),
-                          ),
-                          const Icon(
-                            Icons.record_voice_over,
-                            color: Colors.white54,
-                            size: 18,
-                          ),
-                        ],
-                      ),
-                      Center(
-                        child: Text(
-                          speechRate < 0.4
-                              ? 'Slow'
-                              : speechRate < 0.7
-                                  ? 'Normal'
-                                  : 'Fast',
-                          style: TextStyle(
-                            color: Colors.white.withOpacity(0.7),
-                            fontSize: 14,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const Divider(color: Colors.grey),
-                SwitchListTile(
-                  secondary: Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: isContinuousMode
-                          ? Colors.indigo.withOpacity(0.3)
-                          : Colors.grey.withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Icon(
-                      Icons.loop,
-                      color: isContinuousMode ? Colors.indigo : Colors.grey,
-                      size: 24,
-                    ),
-                  ),
-                  title: const Text(
-                    'Continuous Analysis',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  subtitle: const Text(
-                    'Automatically scan environment',
-                    style: TextStyle(color: Colors.white54),
-                  ),
-                  value: isContinuousMode,
-                  activeColor: Colors.indigo,
-                  onChanged: onContinuousModeChanged,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 30),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              foregroundColor: Colors.white,
-              backgroundColor: Colors.indigo,
-              padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 15),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
-              ),
-            ),
-            onPressed: () => Navigator.pop(context),
-            child: const Text(
-              'Close Settings',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            ),
-          ),
-        ],
-      ),
-    );
   }
 }

@@ -13,7 +13,7 @@ import 'screens/home/home.dart';
 import 'screens/settings.dart';
 import 'screens/blind_mode/blind_mode_home.dart';
 import 'services/auth.dart';
-import 'wrapper.dart';
+
 import 'theme_provider.dart';
 
 // Constants for current date/time and user
